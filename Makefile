@@ -10,7 +10,7 @@ crap-clone: libcrap.a -lssl -lm
 rlog_parse: libcrap.a -lssl -lm
 
 libcrap.a: branch.o changeset.o cvs_connection.o database.o emission.o file.o \
-	heap.o log.o log_parse.o string_cache.o utils.o
+	heap.o log.o log_parse.o string_cache.o tag.o utils.o
 	ar crv $@ $+
 
 CFLAGS=-O2 -Wall -Werror -std=gnu99 -D_GNU_SOURCE -g3 \

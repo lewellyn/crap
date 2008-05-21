@@ -753,9 +753,8 @@ void read_files_versions (database_t * db, cvs_connection_t * s)
             if ((*j)->version != NULL && !(*j)->version->dead)
                 SHA1_Update (&sha, &(*j)->version, sizeof (version_t *));
 
-        SHA1_Final ((unsigned char *) i->hash, &sha);
-        database_tag_hash_insert (db, i);
-
-        i->is_released = false;
+        uint32_t hash[5];
+        SHA1_Final ((unsigned char *) hash, &sha);
+        database_tag_hash_insert (db, hash, i);
     }
 }

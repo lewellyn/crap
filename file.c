@@ -79,28 +79,6 @@ file_tag_t * file_find_branch (const file_t * f,
 }
 
 
-void tag_init (tag_t * tag, const char * name)
-{
-    changeset_init (&tag->changeset);
-    tag->changeset.type = ct_tag;
-    tag->changeset.time = -1 << (sizeof (time_t) * 8 - 1);
-    assert (tag->changeset.time < 0);
-    assert ((tag->changeset.time & (tag->changeset.time - 1)) == 0);
-
-    tag->tag = name;
-    tag->tag_files = NULL;
-    tag->tag_files_end = NULL;
-    tag->branch_versions = NULL;
-
-    tag->parents = NULL;
-    tag->parents_end = NULL;
-
-    tag->tags = NULL;
-    tag->tags_end = NULL;
-    tag->parent = NULL;
-}
-
-
 file_tag_t * find_file_tag (file_t * file, tag_t * tag)
 {
     file_tag_t ** base = tag->tag_files;

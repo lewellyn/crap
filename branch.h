@@ -9,7 +9,7 @@ struct database;
 struct heap;
 
 typedef struct branch_tag {
-    struct tag * tag;
+    struct hashed_tag * tag;
     size_t weight;
 } branch_tag_t;
 

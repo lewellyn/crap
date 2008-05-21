@@ -16,6 +16,7 @@
 #include "database.h"
 #include "emission.h"
 #include "file.h"
+#include "tag.h"
 #include "utils.h"
 
 #include <openssl/sha.h>
@@ -24,11 +25,11 @@
 #include <string.h>
 
 
-static int tag_compare (const void * AA, const void * BB)
+static int hashed_tag_compare (const void * AA, const void * BB)
 {
-    const tag_t * A = AA;
-    const tag_t * B = BB;
-    return A > B;
+    const hashed_tag_t * A = AA;
+    const hashed_tag_t * B = BB;
+    return A->tag > B->tag;
 }
 
 
@@ -58,9 +59,9 @@ static parent_branch_t * unemitted_parent (tag_t * t)
 {
     // FIXME - we should be more deterministic - i.e., the choice of parent
     // should be more obviously related to external observables.
-    parent_branch_t * i = t->parents_end;
-    while (i != t->parents)
-        if (!(--i)->branch->is_released)
+    parent_branch_t * i = t->hash->parents_end;
+    while (i != t->hash->parents)
+        if (!(--i)->branch->hash->is_released)
             return i;
     abort();
 }
@@ -97,9 +98,10 @@ static void break_cycle (heap_t * heap, tag_t * t)
 
     // Remove the parent from the child.
     memmove (best_parent, best_parent + 1,
-             sizeof (parent_branch_t) * (best->parents_end - best_parent - 1));
-    --best->parents_end;
-    if (--best->changeset.unready_count == 0)
+             sizeof (parent_branch_t) * (best->hash->parents_end - best_parent - 1));
+    --best->hash->parents_end;
+    // THIS LOOKS DODGY???  CHECK COUNTS
+    if (--best->hash->changeset.unready_count == 0)
         heap_insert (heap, best);
 
     // Remove the child from the parent.
@@ -115,13 +117,14 @@ static void break_cycle (heap_t * heap, tag_t * t)
 
 
 // Release all the child tags.
-static void tag_released (heap_t * heap, tag_t * tag)
+static void tag_released (heap_t * heap, hashed_tag_t * tag)
 {
     for (branch_tag_t * i = tag->tags; i != tag->tags_end; ++i) {
-        assert (i->tag->changeset.unready_count != 0);
-        if (--i->tag->changeset.unready_count == 0 && !i->tag->is_released) {
-            i->tag->is_released = true;
-            heap_insert (heap, i->tag);
+        hashed_tag_t * child = i->tag->hash;
+        assert (child->changeset.unready_count != 0);
+        if (--child->changeset.unready_count == 0 && !child->is_released) {
+            child->is_released = true;
+            heap_insert (heap, child);
         }
     }
 }
@@ -133,10 +136,13 @@ static void tag_released (heap_t * heap, tag_t * tag)
 // on the trunk.
 static void branch_graph (database_t * db)
 {
-    // First, go through each tag, and put it on all the branches.
-    for (tag_t * i = db->tags; i != db->tags_end; ++i) {
+    // First, go through each hashed tag, and put it on all the branches that
+    // have tagged versions.
+    for (hashed_tag_t * i = database_tag_hash_begin (db);
+         i; i = database_tag_hash_next (db, i)) {
         i->changeset.unready_count = 0;
-        for (file_tag_t ** j = i->tag_files; j != i->tag_files_end; ++j) {
+        for (file_tag_t ** j = i->tag->tag_files;
+             j != i->tag->tag_files_end; ++j) {
             if ((*j)->version == NULL || (*j)->version->branch == NULL)
                 continue;
             tag_t * b = (*j)->version->branch->tag;
@@ -151,7 +157,8 @@ static void branch_graph (database_t * db)
         }
     }
 
-    // Go through each branch and put it onto each tag.
+    // Go through each branch and put it onto each hashed_tag with a link to the
+    // branch.
     for (tag_t * i = db->tags; i != db->tags_end; ++i)
         for (branch_tag_t * j = i->tags; j != i->tags_end; ++j) {
             ARRAY_EXTEND (j->tag->parents);
@@ -163,11 +170,13 @@ static void branch_graph (database_t * db)
     // Do a cycle breaking pass of the branches.
     heap_t heap;
 
-    heap_init (&heap, offsetof (tag_t, changeset.ready_index), tag_compare);
+    heap_init (&heap, offsetof (hashed_tag_t, changeset.ready_index),
+               hashed_tag_compare);
 
     // Release all the tags that are ready right now; also sort the parent
     // lists.
-    for (tag_t * i = db->tags; i != db->tags_end; ++i) {
+    for (hashed_tag_t * i = database_tag_hash_begin (db);
+         i; i = database_tag_hash_next (db, i)) {
         qsort (i->parents, i->parents_end - i->parents,
                sizeof (parent_branch_t), compare_pb);
         if (i->changeset.unready_count == 0) {

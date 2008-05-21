@@ -7,6 +7,7 @@
 #include "log.h"
 #include "log_parse.h"
 #include "string_cache.h"
+#include "tag.h"
 #include "utils.h"
 
 #include <assert.h>
@@ -355,37 +356,36 @@ static void print_commit (const database_t * db, changeset_t * cs,
 }
 
 
-static void print_tag (const database_t * db, tag_t * tag,
+static void print_tag (const database_t * db, hashed_tag_t * tag,
                        cvs_connection_t * s)
 {
-    fprintf (stderr, "%s %s %s\n",
+    fprintf (stderr, "%s %s %s%s\n",
              format_date (&tag->changeset.time),
-             tag->branch_versions ? "BRANCH" : "TAG",
-             tag->tag);
+             tag->tag->sibling == NULL
+             ? tag->tag->branch_versions ? "BRANCH" : "TAG" : "MULITIPLE",
+             tag->tag->sibling ? "" : tag->tag->tag,
+             tag->exact_match ? " Exact match" : "");
 
-    if (tag->exact_match)
-        fprintf (stderr, "Exact match\n");
-
-    tag_t * branch;
-    if (tag->parent == NULL)
-        branch = NULL;
-    else if (tag->parent->type == ct_commit)
-        branch = tag->parent->versions->branch->tag;
-    else
-        branch = as_tag (tag->parent);
+    tag_t * branch = tag->branch;
+/*     if (tag->parent == NULL) */
+/*         branch = NULL; */
+/*     else if (tag->parent->type == ct_commit) */
+/*         branch = tag->parent->versions->branch->tag; */
+/*     else */
+/*         branch = as_tag (tag->parent); */
 
     assert (tag->parent == NULL || (branch && branch->last == tag->parent));
 
-    printf ("reset refs/%s/%s\n",
-            tag->branch_versions ? "heads" : "tags",
-            *tag->tag ? tag->tag : "cvs_master");
+/*     printf ("reset refs/%s/%s\n", */
+/*             tag->branch_versions ? "heads" : "tags", */
+/*             *tag->tag ? tag->tag : "cvs_master"); */
 
-    if (tag->parent) {
-        printf ("from :%lu\n\n", tag->parent->mark);
-        tag->changeset.mark = tag->parent->mark;
-    }
+/*     if (tag->branch) { */
+/*         printf ("from :%lu\n\n", tag->branch->mark); */
+/*         tag->changeset.mark = tag->branch->mark; */
+/*     } */
 
-    tag->last = &tag->changeset;
+/*     tag->last = &tag->changeset; */
 
     // Go through the current versions on the branch and note any version
     // fix-ups required.
@@ -394,12 +394,12 @@ static void print_tag (const database_t * db, tag_t * tag,
     size_t deleted = 0;
     size_t modified = 0;
 
-    file_tag_t ** tf = tag->tag_files;
+    file_tag_t ** tf = tag->tag->tag_files;
     for (file_t * i = db->files; i != db->files_end; ++i) {
         version_t * bv = branch
             ? version_live (branch->branch_versions[i - db->files]) : NULL;
         version_t * tv = NULL;
-        if (tf != tag->tag_files_end && (*tf)->file == i)
+        if (tf != tag->tag->tag_files_end && (*tf)->file == i)
             tv = version_live ((*tf++)->version);
 
         if (bv == tv) {
@@ -417,12 +417,17 @@ static void print_tag (const database_t * db, tag_t * tag,
     }
 
     if (added == 0 && deleted == 0 && modified == 0) {
+        // FIXME - actually set the tags/branches.
         if (!tag->exact_match)
             fprintf (stderr, "WIERD: no fixups but not exact match\n");
         return;                         // Nothing to do.
     }
 
-    tag->changeset.mark = ++mark_counter;
+    if (tag->branch)
+        printf ("reset TAG_FIXUP\nfrom :%lu\n\n", tag->branch->last->mark);
+    else
+        printf ("reset TAG_FIXUP\n");
+
     if (tag->exact_match)
         fprintf (stderr, "WIERD: fixups for exact match\n");
 
@@ -434,12 +439,12 @@ static void print_tag (const database_t * db, tag_t * tag,
                             "(~%zu +%zu -%zu =%zu)\n",
                             modified, added, deleted, keep));
 
-    tf = tag->tag_files;
+    tf = tag->tag->tag_files;
     for (file_t * i = db->files; i != db->files_end; ++i) {
         version_t * bv = branch
             ? version_live (branch->branch_versions[i - db->files]) : NULL;
         version_t * tv = NULL;
-        if (tf != tag->tag_files_end && (*tf)->file == i)
+        if (tf != tag->tag->tag_files_end && (*tf)->file == i)
             tv = version_live ((*tf++)->version);
 
         grab_version (db, s, tv);
@@ -461,9 +466,8 @@ static void print_tag (const database_t * db, tag_t * tag,
     for (const char ** i = list; i != list_end; ++i)
         log_len += strlen (*i);
 
-    printf ("commit refs/%s/%s\n",
-            tag->branch_versions ? "heads" : "tags",
-            *tag->tag ? tag->tag : "cvs_master");
+    printf ("commit TAG_FIXUP\n");
+    tag->changeset.mark = ++mark_counter;
     printf ("mark :%lu\n", tag->changeset.mark);
     printf ("committer crap <crap> %ld +0000\n", tag->changeset.time);
     printf ("data %u\n", log_len);
@@ -473,12 +477,12 @@ static void print_tag (const database_t * db, tag_t * tag,
     }
     xfree (list);
 
-    tf = tag->tag_files;
+    tf = tag->tag->tag_files;
     for (file_t * i = db->files; i != db->files_end; ++i) {
         version_t * bv = branch
             ? version_live (branch->branch_versions[i - db->files]) : NULL;
         version_t * tv = NULL;
-        if (tf != tag->tag_files_end && (*tf)->file == i)
+        if (tf != tag->tag->tag_files_end && (*tf)->file == i)
             tv = version_live ((*tf++)->version);
 
         if (tv != bv) {
@@ -488,6 +492,14 @@ static void print_tag (const database_t * db, tag_t * tag,
                 printf ("M %s :%zu %s\n",
                         tv->exec ? "755" : "644", tv->mark, tv->file->path);
         }
+    }
+
+    for (tag_t * i = tag->tag; i; i = i->sibling) {
+        printf ("reset refs/%s/%s\nfrom :%lu\n\n",
+                i->branch_versions ? "heads" : "tags",
+                *i->tag ? i->tag : "cvs_master",
+                tag->changeset.mark);
+        i->last = &tag->changeset;
     }
 }
 
@@ -520,7 +532,8 @@ int main (int argc, const char * const * argv)
     // the the usual emission process, and branches block revisions on the
     // branch.
 
-    for (tag_t * i = db.tags; i != db.tags_end; ++i) {
+    for (hashed_tag_t * i = database_tag_hash_begin (&db);
+         i; i = database_tag_hash_next (&db, i)) {
         i->is_released = false;
         for (changeset_t ** j = i->changeset.children;
              j != i->changeset.children_end; ++j)
@@ -532,14 +545,18 @@ int main (int argc, const char * const * argv)
 
     // Mark the initial tags as ready to emit, and fill in branches with their
     // initial versions.
-    for (tag_t * i = db.tags; i != db.tags_end; ++i) {
+    for (hashed_tag_t * i = database_tag_hash_begin (&db);
+         i; i = database_tag_hash_next (&db, i)) {
         if (i->changeset.unready_count == 0)
             heap_insert (&db.ready_changesets, &i->changeset);
-        if (i->branch_versions) {
-            memset (i->branch_versions, 0,
+        for (tag_t * j = i->tag; j; j = j->sibling) {
+            if (!j->branch_versions)
+                continue;
+
+            memset (j->branch_versions, 0,
                     sizeof (version_t *) * (db.files_end - db.files));
-            for (file_tag_t ** j = i->tag_files; j != i->tag_files_end; ++j)
-                i->branch_versions[(*j)->file - db.files] = (*j)->version;
+            for (file_tag_t ** k = j->tag_files; k != j->tag_files_end; ++k)
+                j->branch_versions[(*k)->file - db.files] = (*k)->version;
         }
     }
 
@@ -553,7 +570,7 @@ int main (int argc, const char * const * argv)
             changeset_update_branch_versions (&db, changeset);
         }
         else {
-            tag_t * tag = as_tag (changeset);
+            hashed_tag_t * tag = as_tag (changeset);
             tag->is_released = true;
             print_tag (&db, tag, &stream);
         }
@@ -573,14 +590,14 @@ int main (int argc, const char * const * argv)
     size_t matched_tags = 0;
     size_t late_tags = 0;
     for (tag_t * i = db.tags; i != db.tags_end; ++i) {
-        assert (i->is_released);
+        assert (i->hash->is_released);
         if (i->branch_versions)
-            if (i->exact_match)
+            if (i->hash->exact_match)
                 ++matched_branches;
             else
                 ++late_branches;
         else
-            if (i->exact_match)
+            if (i->hash->exact_match)
                 ++matched_tags;
             else
                 ++late_tags;
