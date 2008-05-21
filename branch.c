@@ -102,11 +102,11 @@ static void break_cycle (heap_t * heap, tag_t * t)
     --best->hash->parents_end;
     // THIS LOOKS DODGY???  CHECK COUNTS
     if (--best->hash->changeset.unready_count == 0)
-        heap_insert (heap, best);
+        heap_insert (heap, best->hash);
 
     // Remove the child from the parent.
     for (branch_tag_t * i = parent->tags; i != parent->tags_end; ++i)
-        if (i->tag == best) {
+        if (i->tag == best->hash) {
             memmove (i, i + 1,
                      sizeof (branch_tag_t) * (parent->tags_end - i - 1));
             return;
@@ -119,14 +119,15 @@ static void break_cycle (heap_t * heap, tag_t * t)
 // Release all the child tags.
 static void tag_released (heap_t * heap, hashed_tag_t * tag)
 {
-    for (branch_tag_t * i = tag->tags; i != tag->tags_end; ++i) {
-        hashed_tag_t * child = i->tag->hash;
-        assert (child->changeset.unready_count != 0);
-        if (--child->changeset.unready_count == 0 && !child->is_released) {
-            child->is_released = true;
-            heap_insert (heap, child);
+    for (tag_t * i = tag->tag; i; i = i->sibling)
+        for (branch_tag_t * j = i->tags; j != i->tags_end; ++j) {
+            hashed_tag_t * child = j->tag;
+            assert (child->changeset.unready_count != 0);
+            if (--child->changeset.unready_count == 0 && !child->is_released) {
+                child->is_released = true;
+                heap_insert (heap, child);
+            }
         }
-    }
 }
 
 
@@ -189,7 +190,7 @@ static void branch_graph (database_t * db)
         tag_released (&heap, heap_pop (&heap));
 
     for (tag_t * i = db->tags; i != db->tags_end; ++i)
-        while (!i->is_released) {
+        while (!i->hash->is_released) {
             break_cycle (&heap, i);
             while (!heap_empty (&heap))
                 tag_released (&heap, heap_pop (&heap));
@@ -207,19 +208,19 @@ static bool better_than (tag_t * new, tag_t * old)
 }
 
 
-static void assign_tag_point (database_t * db, tag_t * tag)
+static void assign_tag_point (database_t * db, hashed_tag_t * tag)
 {
-    const char * bt = tag->branch_versions ? "Branch" : "Tag";
-
     // Exact matches have already assigned tag points.
     if (tag->exact_match) {
-        fprintf (stderr, "%s '%s' already exactly matched\n", bt, tag->tag);
+        fprintf (stderr, "%s%s already exactly matched\n",
+                 tag->tag->tag, tag->tag->sibling ? " (& more)" : "");
         return;
     }
 
-    // Some branches have no parents.  I think this should only be the trunk.
+    // Some branches have no parents.  Usually this should only be the trunk.
     if (tag->parents == tag->parents_end) {
-        fprintf (stderr, "%s '%s' has no parents\n", bt, tag->tag);
+        fprintf (stderr, "%s%s has no parents\n",
+                 tag->tag->tag, tag->tag ? " (&more)" : "");
         return;
     }
 
@@ -232,9 +233,9 @@ static void assign_tag_point (database_t * db, tag_t * tag)
     // FIXME - no need to do this if only one parent.
     for (parent_branch_t * i = tag->parents; i != tag->parents_end; ++i) {
         size_t weight = 1;
-        file_tag_t ** j = tag->tag_files;
+        file_tag_t ** j = tag->tag->tag_files;
         file_tag_t ** jj = i->branch->tag_files;
-        while (j != tag->tag_files_end && jj != i->branch->tag_files_end) {
+        while (j != tag->tag->tag_files_end && jj != i->branch->tag_files_end) {
             if ((*j)->file < (*jj)->file) {
                 ++j;
                 continue;
@@ -264,15 +265,16 @@ static void assign_tag_point (database_t * db, tag_t * tag)
     // matches wins.
     assert (best_branch != NULL);
 
-    fprintf (stderr, "%s '%s' placing on branch '%s'\n",
-             bt, tag->tag, best_branch->tag);
+    fprintf (stderr, "%s%s placing on branch '%s'\n",
+             tag->tag->tag, tag->tag->sibling ? " (& more)" : "",
+             best_branch->tag);
 
     ssize_t current = 0;
     ssize_t best = 0;
-    changeset_t * best_cs = &best_branch->changeset;
+    changeset_t * best_cs = &best_branch->hash->changeset;
 
-    for (changeset_t ** i = best_branch->changeset.children;
-         i != best_branch->changeset.children_end; ++i) {
+    for (changeset_t ** i = best_branch->hash->changeset.children;
+         i != best_branch->hash->changeset.children_end; ++i) {
         // Go through the changeset versions; if it matches the tag version,
         // then increment current; if the previous version matches the tag
         // version, then decrement current.  Just to make life fun, the
@@ -287,7 +289,7 @@ static void assign_tag_point (database_t * db, tag_t * tag)
                 assert (j->implicit_merge);
                 continue;
             }
-            file_tag_t * ft = find_file_tag (j->file, tag);
+            file_tag_t * ft = find_file_tag (j->file, tag->tag);
             // FIXME - we should process ft->version==NULL.
             if (ft == NULL || ft->version == NULL)
                 continue;
@@ -336,26 +338,26 @@ static void update_branch_hash (struct database * db,
     uint32_t hash[5];
     SHA1_Final ((unsigned char *) hash, &sha);
 
-    // Iterate over all the tags that match.  FIXME the duplicate flag is no
-    // longer accurate.
-    for (tag_t * i = database_tag_hash_find (db, hash); i;
-         i = database_tag_hash_next (i)) {
-        fprintf (stderr, "*** HIT %s %s%s ***\n",
-                 i->branch_versions ? "BRANCH" : "TAG", i->tag,
-                 i->parent
-                 ? i->exact_match ? " (DUPLICATE)" : " (ALREADY EMITTED)" : "");
-        if (i->parent == NULL) {
-            // FIXME - we want better logic for exact matches following a
-            // generic release.  Ideally an exact match would replace a generic
-            // release if this does not risk introducing cycles.
-            i->exact_match = true;
-            i->parent = changeset;
-            ARRAY_APPEND (changeset->children, &i->changeset);
-        }
-        if (!i->is_released) {
-            i->is_released = true;
-            heap_insert (ready_tags, i);
-        }
+    // Find tags that match.
+    hashed_tag_t * i = database_tag_hash_find (db, hash);
+    if (i == NULL)
+        return;
+
+    fprintf (stderr, "*** HIT %s %s%s ***\n",
+             i->tag->branch_versions ? "BRANCH" : "TAG", i->tag->tag,
+             i->parent
+             ? i->exact_match ? " (DUPLICATE)" : " (ALREADY EMITTED)" : "");
+    if (i->parent == NULL) {
+        // FIXME - we want better logic for exact matches following a
+        // generic release.  Ideally an exact match would replace a generic
+        // release if this does not risk introducing cycles.
+        i->exact_match = true;
+        i->parent = changeset;
+        ARRAY_APPEND (changeset->children, &i->changeset);
+    }
+    if (!i->is_released) {
+        i->is_released = true;
+        heap_insert (ready_tags, i);
     }
 }
 
@@ -369,8 +371,10 @@ static void branch_changesets (database_t * db)
     for (changeset_t * i; (i = next_changeset (db));) {
         changeset_emitted (db, NULL, i);
         assert (i->type == ct_commit);
+        // FIXME - the branch changesets should be on the branch not the
+        // hashed_tag.
         if (i->versions->branch)
-            ARRAY_APPEND (i->versions->branch->tag->changeset.children, i);
+            ARRAY_APPEND (i->versions->branch->tag->hash->changeset.children, i);
     }
 }
 
@@ -402,7 +406,7 @@ static void branch_tree (database_t * db)
         }
 
     while (!heap_empty (&ready_tags)) {
-        tag_t * tag = heap_pop (&ready_tags);
+        hashed_tag_t * tag = heap_pop (&ready_tags);
         tag_released (&ready_tags, tag);
 
         // Release all the children; none should be tags.  (tag_released has
